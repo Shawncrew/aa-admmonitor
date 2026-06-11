@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 NAMES_CHUNK_SIZE = 500
 
 
+def _get(obj, key, default=None):
+    """Field access that works for both pydantic models and plain dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 @shared_task(time_limit=900)
 def run_admmonitor():
     """Main periodic task: refresh ADM data, then handle alerting."""
@@ -55,18 +62,18 @@ def send_daily_report_task():
 
 def update_adm_data(config: AdmMonitorConfig):
     """Fetch sov structures from ESI and update per-system ADM state."""
-    structures = esi.client.Sovereignty.get_sovereignty_structures().results()
+    structures = esi.client.Sovereignty.GetSovereigntyStructures().results()
     allowed_alliances = config.alliance_id_set()
 
     adm_by_system = {}
     owner_by_system = {}
     for structure in structures:
-        alliance_id = structure.get("alliance_id")
+        alliance_id = _get(structure, "alliance_id")
         if allowed_alliances and alliance_id not in allowed_alliances:
             continue
-        system_id = structure["solar_system_id"]
+        system_id = _get(structure, "solar_system_id")
         # The ADM is the 'vulnerability_occupancy_level'; absent means 1.0.
-        adm = structure.get("vulnerability_occupancy_level") or 1.0
+        adm = _get(structure, "vulnerability_occupancy_level") or 1.0
         if system_id not in adm_by_system or adm > adm_by_system[system_id]:
             adm_by_system[system_id] = adm
         owner_by_system[system_id] = alliance_id
@@ -212,28 +219,28 @@ def resolve_names(ids: list) -> dict:
     for offset in range(0, len(ids), NAMES_CHUNK_SIZE):
         chunk = ids[offset : offset + NAMES_CHUNK_SIZE]
         try:
-            results = esi.client.Universe.post_universe_names(ids=chunk).results()
+            results = esi.client.Universe.PostUniverseNames(body=chunk).result()
         except Exception:
             logger.exception("Failed to resolve names for IDs %s", chunk)
             continue
         for entry in results:
-            names[entry["id"]] = entry["name"]
+            names[_get(entry, "id")] = _get(entry, "name")
     return names
 
 
 def lookup_region_name(system_id: int) -> str:
     """Resolve a system's region name (system -> constellation -> region)."""
     try:
-        system = esi.client.Universe.get_universe_systems_system_id(
+        system = esi.client.Universe.GetUniverseSystemsSystemId(
             system_id=system_id
-        ).results()
-        constellation = esi.client.Universe.get_universe_constellations_constellation_id(
-            constellation_id=system["constellation_id"]
-        ).results()
-        region = esi.client.Universe.get_universe_regions_region_id(
-            region_id=constellation["region_id"]
-        ).results()
-        return region["name"]
+        ).result()
+        constellation = esi.client.Universe.GetUniverseConstellationsConstellationId(
+            constellation_id=_get(system, "constellation_id")
+        ).result()
+        region = esi.client.Universe.GetUniverseRegionsRegionId(
+            region_id=_get(constellation, "region_id")
+        ).result()
+        return _get(region, "name", "")
     except Exception:
         logger.warning("Could not resolve region for system %s", system_id)
         return ""

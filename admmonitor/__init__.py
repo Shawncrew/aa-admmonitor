@@ -1,4 +1,4 @@
 """Alliance Auth plugin that monitors sovereignty ADM levels and alerts Discord."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __title__ = "ADM Monitor"

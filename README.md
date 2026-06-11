@@ -55,7 +55,7 @@ layout at `/opt/allianceauth/aa-docker` with your config in `conf/`.
 Append to `conf/requirements.txt`:
 
 ```
-aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.0
+aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.1
 ```
 
 (Pin a tag for reproducible builds; use `@master` to track the latest.)
@@ -152,7 +152,7 @@ docker compose logs -f --tail=100 allianceauth_worker
 ## Installation (bare metal / venv)
 
 ```bash
-pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.0
+pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.1
 ```
 
 Then add `admmonitor` to `INSTALLED_APPS`, add the `CELERYBEAT_SCHEDULE` entry shown above

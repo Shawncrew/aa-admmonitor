@@ -11,7 +11,7 @@ authors = [{ name = "Shawncrew" }]
 requires-python = ">=3.8"
 dependencies = [
     "allianceauth>=3.0",
-    "django-esi>=4.0",
+    "django-esi>=9.0",
     "requests",
 ]
 keywords = ["allianceauth", "eveonline", "esi", "sovereignty", "adm", "discord"]
