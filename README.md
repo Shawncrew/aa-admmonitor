@@ -7,7 +7,8 @@ alerts a Discord channel when systems drop below a configurable threshold.
 ## Features
 
 - **Daily report** at a configurable time (EVE time / UTC) listing every monitored system
-  below the configured ADM threshold, with its current ADM, region and owning alliance.
+  below the configured ADM threshold, with its current ADM, the military / industrial /
+  strategic index levels, region and owning alliance.
 - **Immediate alerts** (toggleable) the moment a system *newly* drops below the threshold.
   Each system alerts **only once** per episode — it can alert again only after recovering
   to/above the threshold and dropping below it again.
@@ -20,19 +21,18 @@ alerts a Discord channel when systems drop below a configurable threshold.
   browsable per-system status table.
 - Uses only **public ESI** endpoints — no ESI tokens or scopes required.
 
-> **Note on military / industrial / strategic indices:** ESI does not expose the individual
-> development indices per system. The only sovereignty defense figure available via ESI is the
-> combined **ADM** (`vulnerability_occupancy_level` from `GET /sovereignty/structures/`),
-> which is what this plugin reports. If CCP ever adds the individual indices to ESI, they can
-> be added to the report.
+> **Military / industrial / strategic indices:** the new ESI sovereignty endpoint
+> (`GetSovereigntySystems`) exposes the full development block per claimed system —
+> `activity_defense_multiplier` (the ADM) plus `military_level`, `industrial_level` and
+> `strategic_level` — all of which are included in the alerts and the status table.
 
 ## How it works
 
 A single Celery task runs on a schedule you define (every 15 minutes recommended). Each run it:
 
-1. Pulls `GET /sovereignty/structures/` from ESI and keeps the systems owned by your
-   configured alliance(s), using `vulnerability_occupancy_level` as the ADM
-   (absent = 1.0).
+1. Pulls the sovereignty systems list from ESI (`GetSovereigntySystems`) and keeps the
+   systems claimed by your configured alliance(s), reading the ADM and the
+   military/industrial/strategic levels from each claim's development block.
 2. Updates the per-system state table, resolving system/region/alliance names once via ESI.
 3. If **immediate alerts** are on, sends one alert covering all systems that newly dropped
    below the threshold and marks them as alerted. A system recovering to/above the
@@ -55,7 +55,7 @@ layout at `/opt/allianceauth/aa-docker` with your config in `conf/`.
 Append to `conf/requirements.txt`:
 
 ```
-aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.1
+aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.2
 ```
 
 (Pin a tag for reproducible builds; use `@master` to track the latest.)
@@ -152,7 +152,7 @@ docker compose logs -f --tail=100 allianceauth_worker
 ## Installation (bare metal / venv)
 
 ```bash
-pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.1
+pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.2
 ```
 
 Then add `admmonitor` to `INSTALLED_APPS`, add the `CELERYBEAT_SCHEDULE` entry shown above
@@ -172,9 +172,10 @@ docker compose exec allianceauth_gunicorn bash -c \
 
 ## FAQ
 
-**Where does the ADM number come from?**
-`GET /sovereignty/structures/` → `vulnerability_occupancy_level` on your sov hub. If the
-field is absent, the ADM is 1.0.
+**Where do the numbers come from?**
+ESI's sovereignty systems endpoint (`GetSovereigntySystems`): each alliance claim carries a
+development block with `activity_defense_multiplier` (the ADM) and the
+military/industrial/strategic index levels.
 
 **Why didn't I get an immediate alert for a system that's been low for weeks?**
 Immediate alerts only fire on *new* drops below the threshold. Long-standing low systems

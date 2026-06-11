@@ -61,26 +61,34 @@ def send_daily_report_task():
 
 
 def update_adm_data(config: AdmMonitorConfig):
-    """Fetch sov structures from ESI and update per-system ADM state."""
-    structures = esi.client.Sovereignty.GetSovereigntyStructures().results()
+    """Fetch sovereignty data from ESI and update per-system ADM state."""
+    data = esi.client.Sovereignty.GetSovereigntySystems().result()
     allowed_alliances = config.alliance_id_set()
 
-    adm_by_system = {}
-    owner_by_system = {}
-    for structure in structures:
-        alliance_id = _get(structure, "alliance_id")
+    # Keep alliance-claimed systems matching the filter. Each entry's 'claim'
+    # is a union of faction / alliance / unclaimed shapes; only the alliance
+    # shape carries the development indices (ADM, military/industrial/strategic).
+    info_by_system = {}
+    for entry in _get(data, "solar_systems") or []:
+        claim = _get(entry, "claim")
+        alliance_claim = _get(claim, "alliance") if claim is not None else None
+        if alliance_claim is None:
+            continue
+        alliance_id = _get(alliance_claim, "alliance_id")
         if allowed_alliances and alliance_id not in allowed_alliances:
             continue
-        system_id = _get(structure, "solar_system_id")
-        # The ADM is the 'vulnerability_occupancy_level'; absent means 1.0.
-        adm = _get(structure, "vulnerability_occupancy_level") or 1.0
-        if system_id not in adm_by_system or adm > adm_by_system[system_id]:
-            adm_by_system[system_id] = adm
-        owner_by_system[system_id] = alliance_id
+        development = _get(alliance_claim, "development")
+        info_by_system[_get(entry, "solar_system_id")] = {
+            "alliance_id": alliance_id,
+            "adm": _get(development, "activity_defense_multiplier", 1.0),
+            "military_level": _get(development, "military_level"),
+            "industrial_level": _get(development, "industrial_level"),
+            "strategic_level": _get(development, "strategic_level"),
+        }
 
-    if allowed_alliances and not adm_by_system:
+    if allowed_alliances and not info_by_system:
         logger.warning(
-            "No sovereignty structures matched the configured alliance IDs %s",
+            "No sovereignty systems matched the configured alliance IDs %s",
             sorted(allowed_alliances),
         )
 
@@ -88,21 +96,21 @@ def update_adm_data(config: AdmMonitorConfig):
     is_first_run = not existing
 
     # Drop systems that left scope (sov lost or filter changed).
-    stale_ids = set(existing) - set(adm_by_system)
+    stale_ids = set(existing) - set(info_by_system)
     if stale_ids:
         SystemAdmStatus.objects.filter(system_id__in=stale_ids).delete()
         logger.info("Removed %d system(s) no longer in scope", len(stale_ids))
 
     # Resolve names for new systems and for all owner alliances (cheap, few IDs).
-    new_system_ids = set(adm_by_system) - set(existing)
+    new_system_ids = set(info_by_system) - set(existing)
     ids_to_resolve = list(new_system_ids) + [
-        aid for aid in set(owner_by_system.values()) if aid
+        info["alliance_id"] for info in info_by_system.values() if info["alliance_id"]
     ]
     names = resolve_names(ids_to_resolve)
 
     now = timezone.now()
     threshold = config.threshold
-    for system_id, adm in adm_by_system.items():
+    for system_id, info in info_by_system.items():
         row = existing.get(system_id)
         if row is None:
             row = SystemAdmStatus(
@@ -110,12 +118,16 @@ def update_adm_data(config: AdmMonitorConfig):
                 system_name=names.get(system_id, str(system_id)),
                 region_name=lookup_region_name(system_id),
             )
-        alliance_id = owner_by_system.get(system_id)
+        alliance_id = info["alliance_id"]
         row.alliance_id = alliance_id
         if alliance_id and alliance_id in names:
             row.alliance_name = names[alliance_id]
 
+        adm = info["adm"]
         row.adm = adm
+        row.military_level = info["military_level"]
+        row.industrial_level = info["industrial_level"]
+        row.strategic_level = info["strategic_level"]
         was_below = row.below_threshold
         is_below = adm < threshold
         if is_below and not was_below:
@@ -135,7 +147,7 @@ def update_adm_data(config: AdmMonitorConfig):
 
     logger.info(
         "ADM data updated: %d system(s) monitored, %d below threshold %g",
-        len(adm_by_system),
+        len(info_by_system),
         SystemAdmStatus.objects.filter(below_threshold=True).count(),
         threshold,
     )
@@ -207,6 +219,12 @@ def send_daily_report(config: AdmMonitorConfig) -> bool:
 def format_system_line(row: SystemAdmStatus, show_alliance: bool) -> str:
     region = f" ({row.region_name})" if row.region_name else ""
     line = f"**{row.system_name}**{region} — ADM **{row.adm:.1f}**"
+    if row.military_level is not None:
+        line += (
+            f" · Mil {row.military_level}"
+            f" / Ind {row.industrial_level}"
+            f" / Str {row.strategic_level}"
+        )
     if show_alliance and row.alliance_name:
         line += f" — {row.alliance_name}"
     return line

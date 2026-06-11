@@ -113,6 +113,9 @@ class SystemAdmStatus(models.Model):
     alliance_name = models.CharField(max_length=255, blank=True, default="")
 
     adm = models.FloatField(verbose_name="ADM")
+    military_level = models.IntegerField(null=True, blank=True)
+    industrial_level = models.IntegerField(null=True, blank=True)
+    strategic_level = models.IntegerField(null=True, blank=True)
     below_threshold = models.BooleanField(default=False)
     immediate_alert_sent = models.BooleanField(
         default=False,
