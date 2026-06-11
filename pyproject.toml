@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aa-admmonitor"
+description = "Alliance Auth plugin that monitors sovereignty ADM levels and sends Discord alerts"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Shawncrew" }]
+requires-python = ">=3.8"
+dependencies = [
+    "allianceauth>=3.0",
+    "django-esi>=4.0",
+    "requests",
+]
+keywords = ["allianceauth", "eveonline", "esi", "sovereignty", "adm", "discord"]
+classifiers = [
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Shawncrew/aa-admmonitor"
+Source = "https://github.com/Shawncrew/aa-admmonitor"
+
+[tool.hatch.version]
+path = "admmonitor/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["admmonitor"]
