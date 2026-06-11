@@ -62,7 +62,9 @@ def send_daily_report_task():
 
 def update_adm_data(config: AdmMonitorConfig):
     """Fetch sovereignty data from ESI and update per-system ADM state."""
-    data = esi.client.Sovereignty.GetSovereigntySystems().result()
+    # use_etag=False: with ETags enabled the client raises HTTPNotModified on
+    # unchanged data; we always want the payload (served from cache when fresh).
+    data = esi.client.Sovereignty.GetSovereigntySystems().result(use_etag=False)
     allowed_alliances = config.alliance_id_set()
 
     # Keep alliance-claimed systems matching the filter. Each entry's 'claim'
@@ -71,6 +73,9 @@ def update_adm_data(config: AdmMonitorConfig):
     info_by_system = {}
     for entry in _get(data, "solar_systems") or []:
         claim = _get(entry, "claim")
+        # aiopenapi3 wraps the faction/alliance/unclaimed union in a RootModel;
+        # the actual variant object sits under '.root'.
+        claim = _get(claim, "root", claim)
         alliance_claim = _get(claim, "alliance") if claim is not None else None
         if alliance_claim is None:
             continue
@@ -237,7 +242,9 @@ def resolve_names(ids: list) -> dict:
     for offset in range(0, len(ids), NAMES_CHUNK_SIZE):
         chunk = ids[offset : offset + NAMES_CHUNK_SIZE]
         try:
-            results = esi.client.Universe.PostUniverseNames(body=chunk).result()
+            results = esi.client.Universe.PostUniverseNames(body=chunk).result(
+                use_etag=False
+            )
         except Exception:
             logger.exception("Failed to resolve names for IDs %s", chunk)
             continue
@@ -251,13 +258,13 @@ def lookup_region_name(system_id: int) -> str:
     try:
         system = esi.client.Universe.GetUniverseSystemsSystemId(
             system_id=system_id
-        ).result()
+        ).result(use_etag=False)
         constellation = esi.client.Universe.GetUniverseConstellationsConstellationId(
             constellation_id=_get(system, "constellation_id")
-        ).result()
+        ).result(use_etag=False)
         region = esi.client.Universe.GetUniverseRegionsRegionId(
             region_id=_get(constellation, "region_id")
-        ).result()
+        ).result(use_etag=False)
         return _get(region, "name", "")
     except Exception:
         logger.warning("Could not resolve region for system %s", system_id)
