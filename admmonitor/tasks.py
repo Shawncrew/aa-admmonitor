@@ -205,20 +205,22 @@ def update_adm_data(config: AdmMonitorConfig):
         )
 
     logger.info(
-        "ADM data updated: %d system(s) in %d constellation(s), %d below threshold %g",
+        "ADM data updated: %d system(s) in %d constellation(s), %d below threshold %g "
+        "(%d reported, the rest sit in ignored constellations)",
         len(info_by_system),
         len(seen_constellations),
         SystemAdmStatus.objects.filter(below_threshold=True).count(),
         threshold,
+        SystemAdmStatus.reportable_below().count(),
     )
 
 
 def send_immediate_alerts(config: AdmMonitorConfig):
     """Alert once for every system that newly dropped below the threshold."""
     pending = list(
-        SystemAdmStatus.objects.filter(
-            below_threshold=True, immediate_alert_sent=False
-        ).order_by("adm", "system_name")
+        SystemAdmStatus.reportable_below()
+        .filter(immediate_alert_sent=False)
+        .order_by("adm", "system_name")
     )
     if not pending:
         return
@@ -267,11 +269,7 @@ def check_daily_report(config: AdmMonitorConfig):
 
 
 def send_daily_report(config: AdmMonitorConfig) -> bool:
-    below = list(
-        SystemAdmStatus.objects.filter(below_threshold=True).order_by(
-            "adm", "system_name"
-        )
-    )
+    below = list(SystemAdmStatus.reportable_below().order_by("adm", "system_name"))
     if below:
         show_alliance = len(config.alliance_id_set()) != 1
         lines = [format_system_line(row, show_alliance) for row in below]

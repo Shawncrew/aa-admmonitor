@@ -2,6 +2,7 @@ from datetime import time
 
 from django.contrib.auth.models import Group
 from django.db import models
+from django.db.models import Q
 
 
 class AdmMonitorConfig(models.Model):
@@ -188,6 +189,15 @@ class MonitoredConstellation(models.Model):
             "has a different name than the Auth group."
         ),
     )
+    ignored = models.BooleanField(
+        default=False,
+        verbose_name="Ignored",
+        help_text=(
+            "Exclude this constellation from all reporting. Its systems are still "
+            "tracked and visible in System ADM Statuses, but they never appear on "
+            "the status board and never trigger an alert, however low their ADM."
+        ),
+    )
     last_seen_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     class Meta:
@@ -239,6 +249,18 @@ class SystemAdmStatus(models.Model):
 
     def __str__(self) -> str:
         return f"{self.system_name} (ADM {self.adm:g})"
+
+    @classmethod
+    def reportable_below(cls):
+        """Systems below the threshold that should actually be reported.
+
+        Excludes constellations flagged as ignored. Systems whose constellation
+        could not be resolved are kept — they show up under 'Unassigned systems'
+        rather than silently disappearing.
+        """
+        return cls.objects.filter(below_threshold=True).filter(
+            Q(constellation__isnull=True) | Q(constellation__ignored=False)
+        )
 
 
 class StatusBoardMessage(models.Model):

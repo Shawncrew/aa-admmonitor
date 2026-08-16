@@ -34,7 +34,7 @@ def board_signature(config) -> tuple:
     reassigning a constellation also triggers a repost.
     """
     below = list(
-        SystemAdmStatus.objects.filter(below_threshold=True)
+        SystemAdmStatus.reportable_below()
         .select_related("constellation")
         .order_by("adm", "system_name")
     )

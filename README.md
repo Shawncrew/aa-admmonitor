@@ -20,6 +20,8 @@ configurable threshold, grouped by constellation and pinging the groups responsi
 - **Quiet when nothing changes.** The board is only reposted when the set of systems below
   the threshold actually changes (plus one daily refresh, so the board stays near the bottom
   of the channel).
+- **Ignore constellations** you don't care about (staging, rentals) — still tracked in the
+  admin, never reported.
 - Per-system detail: current ADM plus the military / industrial / strategic index levels,
   region and owning alliance.
 - Monitor one or more alliances (comma-separated alliance IDs); systems and constellations
@@ -179,6 +181,13 @@ the lowest ADM in it.
 Open a constellation and pick its **Alerted groups** (the Auth groups to ping). Add
 **Extra mentions** if a group's Discord role has a different name. Constellations without a
 group still appear on the board — just without a ping.
+
+**Ignoring a constellation.** Tick **Ignored** to drop a constellation out of reporting
+entirely — staging systems, rentals, anything you don't want cluttering the board. Its
+systems are still polled and still visible in *System ADM Statuses*, but they never appear
+on the board and never trigger an alert, however low the ADM gets. The flag is editable
+straight from the constellation list (or in bulk via the *Ignore selected* /
+*Stop ignoring selected* actions), and the board is reposted without them on the next check.
 
 ### 9. Test it
 

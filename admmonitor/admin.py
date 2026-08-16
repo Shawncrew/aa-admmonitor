@@ -158,13 +158,15 @@ class MonitoredConstellationAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "region_name",
+        "ignored",
         "assigned_groups",
         "system_count",
         "systems_below",
         "lowest_adm",
         "extra_mentions",
     )
-    list_filter = ("region_name", "groups")
+    list_editable = ("ignored",)
+    list_filter = ("ignored", "region_name", "groups")
     search_fields = ("name", "region_name", "groups__name")
     filter_horizontal = ("groups",)
     ordering = ("region_name", "name")
@@ -173,10 +175,12 @@ class MonitoredConstellationAdmin(admin.ModelAdmin):
         "constellation_id",
         "name",
         "region_name",
+        "ignored",
         "groups",
         "extra_mentions",
         "last_seen_at",
     )
+    actions = ("ignore_constellations", "unignore_constellations")
 
     def get_queryset(self, request):
         return (
@@ -213,6 +217,25 @@ class MonitoredConstellationAdmin(admin.ModelAdmin):
     def lowest_adm(self, obj):
         return f"{obj._lowest_adm:.1f}" if obj._lowest_adm is not None else "—"
 
+    @admin.action(description="Ignore selected (stop reporting them)")
+    def ignore_constellations(self, request, queryset):
+        updated = queryset.update(ignored=True)
+        self.message_user(
+            request,
+            f"Now ignoring {updated} constellation(s). They drop off the status "
+            "board on the next check.",
+            messages.SUCCESS,
+        )
+
+    @admin.action(description="Stop ignoring selected (resume reporting)")
+    def unignore_constellations(self, request, queryset):
+        updated = queryset.update(ignored=False)
+        self.message_user(
+            request,
+            f"Resumed reporting for {updated} constellation(s).",
+            messages.SUCCESS,
+        )
+
 
 @admin.register(SystemAdmStatus)
 class SystemAdmStatusAdmin(admin.ModelAdmin):
@@ -229,7 +252,12 @@ class SystemAdmStatusAdmin(admin.ModelAdmin):
         "first_seen_below",
         "last_updated",
     )
-    list_filter = ("below_threshold", "region_name", "constellation")
+    list_filter = (
+        "below_threshold",
+        "constellation__ignored",
+        "region_name",
+        "constellation",
+    )
     search_fields = ("system_name", "alliance_name", "constellation__name")
     ordering = ("adm", "system_name")
     list_select_related = ("constellation",)
