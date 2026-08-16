@@ -2,29 +2,48 @@
 
 An [Alliance Auth](https://gitlab.com/allianceauth/allianceauth) plugin that monitors the
 **ADM (Activity Defense Multiplier)** of your alliance's sovereignty systems via ESI and
-alerts a Discord channel when systems drop below a configurable threshold.
+keeps a live **status board** in a Discord channel listing every system below a
+configurable threshold, grouped by constellation and pinging the groups responsible for it.
 
 ## Features
 
-- **Daily report** at a configurable time (EVE time / UTC) listing every monitored system
-  below the configured ADM threshold, with its current ADM, the military / industrial /
-  strategic index levels, region and owning alliance.
-- **Immediate alerts** (toggleable) the moment a system *newly* drops below the threshold.
-  Each system alerts **only once** per episode — it can alert again only after recovering
-  to/above the threshold and dropping below it again.
-- Delivery through your existing **[allianceauth-discordbot](https://github.com/Solar-Helix-Independent-Transport/allianceauth-discordbot)**
-  (just a channel ID), with an optional plain **Discord webhook** as fallback — no extra bot needed.
+- **Status board instead of alert spam.** The plugin purges the channel and reposts a
+  single current picture of every system below the threshold, **grouped by constellation**.
+  There is never a trail of stale alerts to scroll through — what's in the channel *is* the
+  current state.
+- **Constellation → group assignments.** Every constellation holding at least one system
+  claimed by a monitored alliance shows up automatically in the admin. Assign any number of
+  Auth **groups** (usually corporations) to each constellation; a group can own several
+  constellations and a constellation can have several groups.
+- **Targeted pings.** The Discord roles of the assigned groups are mentioned **right after
+  the constellation name**, so each corp sees its own constellations highlighted.
+- **Quiet when nothing changes.** The board is only reposted when the set of systems below
+  the threshold actually changes (plus one daily refresh, so the board stays near the bottom
+  of the channel).
+- Per-system detail: current ADM plus the military / industrial / strategic index levels,
+  region and owning alliance.
+- Monitor one or more alliances (comma-separated alliance IDs); systems and constellations
+  are picked up and dropped automatically as sovereignty changes — group assignments survive.
 - All configuration lives in the **Alliance Auth admin panel** (`/admin/` → ADM Monitor).
-- Monitor one or more alliances (comma-separated alliance IDs); systems are picked up and
-  dropped automatically as sovereignty changes.
-- Admin actions: *Send test message*, *Run ADM check now*, *Send daily report now*, and a
-  browsable per-system status table.
 - Uses only **public ESI** endpoints — no ESI tokens or scopes required.
+- Falls back to the older append-only embed alerts (via allianceauth-discordbot or a
+  webhook) if no Discord bot token is available.
 
-> **Military / industrial / strategic indices:** the new ESI sovereignty endpoint
-> (`GetSovereigntySystems`) exposes the full development block per claimed system —
-> `activity_defense_multiplier` (the ADM) plus `military_level`, `industrial_level` and
-> `strategic_level` — all of which are included in the alerts and the status table.
+### What the board looks like
+
+```
+## 🛡️ ADM Status Board
+Systems below ADM 4.0 · updated 16 August 2026 14:15
+
+**KVN-36** · Fountain @Corp Alpha @Corp Bravo
+> **Y-2ANO** — ADM 2.4 · Mil 3 / Ind 1 / Str 2 — My Alliance
+> **4-07MU** — ADM 3.1 · Mil 4 / Ind 2 / Str 2 — My Alliance
+
+**B-7DFU** · Delve @Corp Charlie
+> **319-3D** — ADM 3.6 · Mil 4 / Ind 3 / Str 1 — My Alliance
+```
+
+Constellations are ordered by their worst system, so the most urgent block is at the top.
 
 ## How it works
 
@@ -33,15 +52,27 @@ A single Celery task runs on a schedule you define (every 15 minutes recommended
 1. Pulls the sovereignty systems list from ESI (`GetSovereigntySystems`) and keeps the
    systems claimed by your configured alliance(s), reading the ADM and the
    military/industrial/strategic levels from each claim's development block.
-2. Updates the per-system state table, resolving system/region/alliance names once via ESI.
-3. If **immediate alerts** are on, sends one alert covering all systems that newly dropped
-   below the threshold and marks them as alerted. A system recovering to/above the
-   threshold resets its alert flag.
-4. If the configured **daily report time** (UTC) has passed and today's report hasn't been
-   sent yet, sends the daily report.
+2. Updates the per-system state table. For systems it hasn't seen before it resolves
+   system → constellation → region once via ESI and creates the constellation row that you
+   then assign groups to.
+3. Renders the board and compares it with what's currently posted. If it changed (or the
+   daily refresh is due), it **deletes the messages in the channel** and posts the new board,
+   pinging the roles of the groups assigned to each affected constellation.
 
-On the very first run after installation, systems already below the threshold are treated as
-baseline and do **not** trigger immediate alerts (the daily report covers them).
+### How groups become Discord pings
+
+Auth groups are matched to Discord roles **by name**, which is how Auth's own Discord
+service names the roles it manages — an Auth group `Corp Alpha` pings the Discord role
+`Corp Alpha`. If a role is named differently, put the raw mention in the constellation's
+**Extra mentions** field (e.g. `<@&123456789012345678>`, or `@here`); it is appended after
+the group pings. Unmatched groups are logged as a warning and skipped rather than failing
+the run.
+
+> **Note on re-pinging:** because the board is deleted and reposted, every constellation
+> that currently has a system below the threshold is pinged again on each repost — not just
+> the constellation that changed. Reposts only happen when the content actually changes, so
+> a steady state is silent. If you want even fewer pings, turn *Repost on change* off and
+> leave only the daily refresh.
 
 ---
 
@@ -55,7 +86,7 @@ layout at `/opt/allianceauth/aa-docker` with your config in `conf/`.
 Append to `conf/requirements.txt`:
 
 ```
-aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.3
+aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.2.0
 ```
 
 (Pin a tag for reproducible builds; use `@master` to track the latest.)
@@ -77,10 +108,6 @@ CELERYBEAT_SCHEDULE["admmonitor_run"] = {
 }
 ```
 
-The daily report is sent on the **first run at/after the configured time**, so with a
-15-minute schedule it arrives within 15 minutes of the configured time. Use
-`crontab(minute="*/5")` if you want tighter timing.
-
 ### 3. Rebuild and restart the stack
 
 ```bash
@@ -96,21 +123,34 @@ docker compose exec allianceauth_gunicorn bash -c \
   "python /home/allianceauth/myauth/manage.py migrate admmonitor"
 ```
 
-(Or open a shell with `docker compose exec allianceauth_gunicorn bash` and run `auth migrate`.)
-
 ### 5. Restart the workers and beat
-
-The workers and beat need the new code and schedule:
 
 ```bash
 docker compose restart allianceauth_worker_beat
 docker compose restart $(docker compose ps --services | grep worker)
 ```
 
-(A plain `docker compose --env-file=.env up -d` after the build typically recreates them
-already — the restart is just to be sure.)
+### 6. Give the bot the right channel permissions
 
-### 6. Configure in the admin panel
+The status board needs a **bot token** (it has to delete messages, which webhooks and
+allianceauth-discordbot cannot do). If you already run Auth's Discord service or
+allianceauth-discordbot, `DISCORD_BOT_TOKEN` and `DISCORD_GUILD_ID` are already in your
+`local.py` and the plugin picks them up automatically — otherwise set them in the plugin
+config.
+
+In Discord, the bot needs these permissions **in the board channel**:
+
+| Permission | Why |
+|---|---|
+| View Channel | read the channel |
+| Send Messages | post the board |
+| Manage Messages | delete the previous board |
+| Mention @everyone, @here and All Roles | ping roles that aren't set "mentionable" |
+
+Give the channel its own dedicated home — with *Purge all messages* on (the default) the
+plugin removes **everything** in it on each repost.
+
+### 7. Configure in the admin panel
 
 Open your Auth site → **Admin** → **ADM Monitor** → **ADM Monitor Configuration** → *Add*:
 
@@ -118,21 +158,35 @@ Open your Auth site → **Admin** → **ADM Monitor** → **ADM Monitor Configur
 |---|---|
 | **Enabled** | Master switch for the whole monitor. |
 | **Threshold** | Systems with ADM strictly below this value are reported (e.g. `4.0`). |
-| **Alliance IDs** | Comma-separated alliance IDs to monitor, e.g. `99003581`. Find yours on [zKillboard](https://zkillboard.com/) or via `https://esi.evetech.net/latest/search/` — it's the number in your alliance's zkill/dotlan URL. Leave blank to monitor *all* sov systems in the game (not recommended). |
-| **Discord channel ID** | Target channel for alerts, sent via allianceauth-discordbot. Enable Developer Mode in Discord, right-click the channel → *Copy ID*. The bot must have permission to post there. |
-| **Webhook URL (fallback)** | Optional. Used if the bot path is unavailable/fails. Channel settings → Integrations → Webhooks. |
-| **Immediate alerts enabled** | Toggle for instant alerts on new threshold crossings. |
-| **Daily report enabled** | Toggle for the daily summary. |
-| **Daily report time** | Time of day in **EVE time (UTC)** for the daily report. |
+| **Alliance IDs** | Comma-separated alliance IDs to monitor, e.g. `99003581`. Leave blank to monitor *all* sov systems in the game (not recommended). |
+| **Discord channel ID** | Channel the board lives in. Developer Mode → right-click the channel → *Copy ID*. |
+| **Discord bot token** | Leave blank to use the `DISCORD_BOT_TOKEN` setting. |
+| **Discord server (guild) ID** | Leave blank to use the `DISCORD_GUILD_ID` setting. Used to resolve groups to roles. |
+| **Webhook URL (fallback)** | Optional, only used for the append-only fallback mode. |
+| **Status board enabled** | Purge-and-repost mode. Off = the old append-only alerts. |
+| **Purge all messages** | On: delete *every* message in the channel on repost. Off: delete only the board messages this plugin posted. |
+| **Mention groups** | Ping the roles of the groups assigned to each constellation. |
+| **Repost on change** | Repost (and re-ping) as soon as the list of below-threshold systems changes. |
+| **Daily refresh enabled / time** | Repost once a day even when nothing changed, at this time in **EVE time (UTC)**. |
 
-### 7. Test it
+### 8. Assign constellations to groups
+
+Run **ADM Monitor Configuration → Run ADM check now** once. The plugin then populates
+**Admin → ADM Monitor → Monitored Constellations** with every constellation holding at
+least one of your systems, showing the system count, how many are below the threshold and
+the lowest ADM in it.
+
+Open a constellation and pick its **Alerted groups** (the Auth groups to ping). Add
+**Extra mentions** if a group's Discord role has a different name. Constellations without a
+group still appear on the board — just without a ping.
+
+### 9. Test it
 
 On the configuration list page, tick the config and use the admin actions:
 
 - **Send test message to Discord** — verifies delivery end-to-end.
-- **Run ADM check now** — queues an immediate ESI refresh; then check
-  **System ADM Statuses** in the admin to see the data.
-- **Send daily report now** — sends the report immediately.
+- **Run ADM check now** — queues an immediate ESI refresh and board update.
+- **Repost status board now** — forces a purge + repost regardless of changes.
 
 Worker logs if something misbehaves:
 
@@ -140,19 +194,12 @@ Worker logs if something misbehaves:
 docker compose logs -f --tail=100 allianceauth_worker
 ```
 
-### Notes for this setup
-
-- Your stack already runs the `aadiscordbot` queue worker (`allianceauth_worker_pingbot`),
-  so bot delivery works out of the box — no extra Celery routing needed.
-- All containers are built from the same image, so the plugin (and its admin pages, tasks)
-  is available everywhere after one `docker compose build`.
-
 ---
 
 ## Installation (bare metal / venv)
 
 ```bash
-pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.1.3
+pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.2.0
 ```
 
 Then add `admmonitor` to `INSTALLED_APPS`, add the `CELERYBEAT_SCHEDULE` entry shown above
@@ -170,6 +217,13 @@ docker compose exec allianceauth_gunicorn bash -c \
   "python /home/allianceauth/myauth/manage.py migrate admmonitor"
 ```
 
+### Upgrading from 0.1.x
+
+Existing system rows are backfilled with their constellation on the next run (one extra ESI
+lookup per system, once). Set the bot token / guild ID if they aren't already in `local.py`,
+give the bot *Manage Messages* in the board channel, then assign your constellations to
+groups. Until you do, the board posts with no pings — nothing breaks.
+
 ## FAQ
 
 **Where do the numbers come from?**
@@ -177,12 +231,20 @@ ESI's sovereignty systems endpoint (`GetSovereigntySystems`): each alliance clai
 development block with `activity_defense_multiplier` (the ADM) and the
 military/industrial/strategic index levels.
 
-**Why didn't I get an immediate alert for a system that's been low for weeks?**
-Immediate alerts only fire on *new* drops below the threshold. Long-standing low systems
-appear in the daily report. Use the *Reset immediate-alert state* admin action on a system
-if you want it to alert again without recovering first.
+**Why is my group not being pinged?**
+The Discord role must have the same name as the Auth group. Check the worker log for
+`No Discord role named '...'`, and use the constellation's **Extra mentions** field for
+roles that don't match by name.
 
-**What timezone is the daily report time?**
+**Can I keep other messages in the board channel?**
+Yes — turn *Purge all messages* off. The plugin then only deletes the board messages it
+posted itself (tracked in the DB), leaving everything else alone.
+
+**What if I don't want to give the plugin a bot token?**
+Turn *Status board enabled* off. The plugin falls back to the 0.1.x behaviour: append-only
+embeds through allianceauth-discordbot or a webhook, with no purging and no group pings.
+
+**What timezone is the daily refresh time?**
 UTC, i.e. EVE time.
 
 **Does this need an ESI token?**

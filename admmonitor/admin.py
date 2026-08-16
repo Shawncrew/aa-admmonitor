@@ -1,7 +1,13 @@
 from django.contrib import admin, messages
+from django.db.models import Count, Min, Q
 
-from . import tasks
-from .models import AdmMonitorConfig, SystemAdmStatus
+from . import discordapi, tasks
+from .models import (
+    AdmMonitorConfig,
+    MonitoredConstellation,
+    StatusBoardMessage,
+    SystemAdmStatus,
+)
 from .notify import COLOR_INFO, send_alert
 
 
@@ -11,17 +17,45 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
         "__str__",
         "enabled",
         "threshold",
+        "status_board_enabled",
         "immediate_alerts_enabled",
         "daily_report_enabled",
         "daily_report_time",
         "last_daily_report_at",
     )
-    readonly_fields = ("last_daily_report_at",)
+    readonly_fields = ("last_daily_report_at", "board_status")
     fieldsets = (
         ("General", {"fields": ("enabled", "threshold", "alliance_ids")}),
-        ("Discord delivery", {"fields": ("discord_channel_id", "webhook_url")}),
         (
-            "Alerting",
+            "Discord delivery",
+            {
+                "fields": (
+                    "discord_channel_id",
+                    "discord_bot_token",
+                    "discord_guild_id",
+                    "webhook_url",
+                )
+            },
+        ),
+        (
+            "Status board",
+            {
+                "fields": (
+                    "status_board_enabled",
+                    "purge_all_messages",
+                    "mention_groups",
+                    "board_status",
+                ),
+                "description": (
+                    "The status board keeps a single, current list of systems below "
+                    "the threshold in the channel, grouped by constellation, instead "
+                    "of posting a new alert every time. Assign the groups to ping "
+                    "under <b>Monitored Constellations</b>."
+                ),
+            },
+        ),
+        (
+            "Refresh schedule",
             {
                 "fields": (
                     "immediate_alerts_enabled",
@@ -32,10 +66,28 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
             },
         ),
     )
-    actions = ("send_test_message", "run_check_now", "send_daily_report_now")
+    actions = ("send_test_message", "run_check_now", "refresh_board_now")
 
     def has_add_permission(self, request):
         return not AdmMonitorConfig.objects.exists()
+
+    @admin.display(description="Board status")
+    def board_status(self, obj):
+        if obj is None or not obj.pk:
+            return "—"
+        if not obj.status_board_enabled:
+            return "Disabled — falling back to append-only alerts."
+        if not obj.discord_channel_id:
+            return "⚠️ No Discord channel ID set."
+        if not discordapi.bot_token(obj):
+            return (
+                "⚠️ No bot token here and no DISCORD_BOT_TOKEN setting — "
+                "falling back to append-only alerts."
+            )
+        count = StatusBoardMessage.objects.filter(
+            channel_id=obj.discord_channel_id
+        ).count()
+        return f"✅ Active — currently {count} message(s) posted."
 
     @admin.action(description="Send test message to Discord")
     def send_test_message(self, request, queryset):
@@ -60,20 +112,83 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
     def run_check_now(self, request, queryset):
         tasks.run_admmonitor.delay()
         self.message_user(
-            request, "ADM check queued — see System ADM Statuses shortly.",
+            request,
+            "ADM check queued — see System ADM Statuses shortly.",
             messages.SUCCESS,
         )
 
-    @admin.action(description="Send daily report now")
-    def send_daily_report_now(self, request, queryset):
-        tasks.send_daily_report_task.delay()
-        self.message_user(request, "Daily report queued.", messages.SUCCESS)
+    @admin.action(description="Repost status board now")
+    def refresh_board_now(self, request, queryset):
+        tasks.refresh_board_task.delay(force=True)
+        self.message_user(request, "Status board repost queued.", messages.SUCCESS)
+
+
+@admin.register(MonitoredConstellation)
+class MonitoredConstellationAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "region_name",
+        "assigned_groups",
+        "system_count",
+        "systems_below",
+        "lowest_adm",
+        "extra_mentions",
+    )
+    list_filter = ("region_name", "groups")
+    search_fields = ("name", "region_name", "groups__name")
+    filter_horizontal = ("groups",)
+    ordering = ("region_name", "name")
+    readonly_fields = ("constellation_id", "name", "region_name", "last_seen_at")
+    fields = (
+        "constellation_id",
+        "name",
+        "region_name",
+        "groups",
+        "extra_mentions",
+        "last_seen_at",
+    )
+
+    def get_queryset(self, request):
+        return (
+            super()
+            .get_queryset(request)
+            .prefetch_related("groups")
+            .annotate(
+                _system_count=Count("systems", distinct=True),
+                _below_count=Count(
+                    "systems", filter=Q(systems__below_threshold=True), distinct=True
+                ),
+                _lowest_adm=Min("systems__adm"),
+            )
+        )
+
+    def has_add_permission(self, request):
+        # Rows appear automatically as sovereignty data is refreshed.
+        return False
+
+    @admin.display(description="Alerted groups")
+    def assigned_groups(self, obj):
+        names = [group.name for group in obj.groups.all()]
+        return ", ".join(names) if names else "— none —"
+
+    @admin.display(description="Systems", ordering="_system_count")
+    def system_count(self, obj):
+        return obj._system_count
+
+    @admin.display(description="Below threshold", ordering="_below_count")
+    def systems_below(self, obj):
+        return obj._below_count
+
+    @admin.display(description="Lowest ADM", ordering="_lowest_adm")
+    def lowest_adm(self, obj):
+        return f"{obj._lowest_adm:.1f}" if obj._lowest_adm is not None else "—"
 
 
 @admin.register(SystemAdmStatus)
 class SystemAdmStatusAdmin(admin.ModelAdmin):
     list_display = (
         "system_name",
+        "constellation",
         "region_name",
         "alliance_name",
         "adm",
@@ -81,13 +196,13 @@ class SystemAdmStatusAdmin(admin.ModelAdmin):
         "industrial_level",
         "strategic_level",
         "below_threshold",
-        "immediate_alert_sent",
         "first_seen_below",
         "last_updated",
     )
-    list_filter = ("below_threshold", "immediate_alert_sent", "region_name")
-    search_fields = ("system_name", "alliance_name")
+    list_filter = ("below_threshold", "region_name", "constellation")
+    search_fields = ("system_name", "alliance_name", "constellation__name")
     ordering = ("adm", "system_name")
+    list_select_related = ("constellation",)
     actions = ("reset_alert_state",)
 
     def has_add_permission(self, request):

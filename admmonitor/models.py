@@ -1,5 +1,6 @@
 from datetime import time
 
+from django.contrib.auth.models import Group
 from django.db import models
 
 
@@ -34,9 +35,29 @@ class AdmMonitorConfig(models.Model):
         blank=True,
         verbose_name="Discord channel ID",
         help_text=(
-            "Channel the alerts are sent to via allianceauth-discordbot. "
-            "Enable Developer Mode in Discord, right-click the channel and 'Copy ID'. "
-            "The bot must be able to see and write in this channel."
+            "Channel the status board lives in. Enable Developer Mode in Discord, "
+            "right-click the channel and 'Copy ID'. The bot must be able to read, "
+            "write and manage messages in this channel."
+        ),
+    )
+    discord_bot_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="Discord bot token",
+        help_text=(
+            "Bot token used to purge and repost the status board. Leave blank to use "
+            "the DISCORD_BOT_TOKEN setting from your Auth config. Without a token the "
+            "monitor falls back to plain (append-only) alerts."
+        ),
+    )
+    discord_guild_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Discord server (guild) ID",
+        help_text=(
+            "Server the channel belongs to, used to resolve Auth groups to Discord "
+            "roles by name. Leave blank to use the DISCORD_GUILD_ID setting."
         ),
     )
     webhook_url = models.CharField(
@@ -45,33 +66,65 @@ class AdmMonitorConfig(models.Model):
         default="",
         verbose_name="Webhook URL (fallback)",
         help_text=(
-            "Optional Discord webhook used when allianceauth-discordbot is not "
-            "installed or sending via the bot fails."
+            "Optional Discord webhook used when no bot token is available and "
+            "allianceauth-discordbot is not installed."
+        ),
+    )
+
+    status_board_enabled = models.BooleanField(
+        default=True,
+        help_text=(
+            "Maintain a single up-to-date status board in the channel: existing "
+            "messages are deleted and the current list of systems below the "
+            "threshold, grouped by constellation, is reposted. Requires a bot token."
+        ),
+    )
+    purge_all_messages = models.BooleanField(
+        default=True,
+        help_text=(
+            "When reposting the board, delete every message in the channel. Turn this "
+            "off to delete only the board messages this plugin posted, leaving other "
+            "messages in the channel untouched."
+        ),
+    )
+    mention_groups = models.BooleanField(
+        default=True,
+        help_text=(
+            "Ping the Discord roles matching the Auth groups assigned to each "
+            "constellation. The mentions are rendered right after the constellation "
+            "name."
         ),
     )
 
     daily_report_enabled = models.BooleanField(
         default=True,
-        help_text="Send a daily report listing all systems below the threshold.",
+        verbose_name="Daily refresh enabled",
+        help_text=(
+            "Repost the board once a day even when nothing changed, so the roles get "
+            "pinged again and the board stays near the bottom of the channel."
+        ),
     )
     daily_report_time = models.TimeField(
         default=time(12, 0),
+        verbose_name="Daily refresh time",
         help_text=(
-            "Time of day (EVE time / UTC) the daily report is sent. The report goes "
-            "out on the first monitor run at or after this time."
+            "Time of day (EVE time / UTC) of the daily repost. It goes out on the "
+            "first monitor run at or after this time."
         ),
     )
     immediate_alerts_enabled = models.BooleanField(
         default=True,
+        verbose_name="Repost on change",
         help_text=(
-            "Alert as soon as a system newly drops below the threshold. Each system "
-            "alerts only once; it can alert again only after recovering to or above "
-            "the threshold and dropping below it again."
+            "Repost the board (and re-ping the assigned groups) as soon as the set of "
+            "systems below the threshold changes. With this off the board is only "
+            "refreshed at the daily refresh time."
         ),
     )
 
-    last_daily_report_at = models.DateTimeField(
-        null=True, blank=True, editable=False
+    last_daily_report_at = models.DateTimeField(null=True, blank=True, editable=False)
+    last_board_signature = models.CharField(
+        max_length=64, blank=True, default="", editable=False
     )
 
     class Meta:
@@ -103,12 +156,64 @@ class AdmMonitorConfig(models.Model):
         return result
 
 
+class MonitoredConstellation(models.Model):
+    """A constellation holding at least one system claimed by a monitored alliance.
+
+    Rows are created automatically as sovereignty data is refreshed; the group
+    assignment is what admins edit here. Rows are kept even when the alliance
+    loses every system in the constellation, so the assignment survives.
+    """
+
+    constellation_id = models.BigIntegerField(unique=True)
+    name = models.CharField(max_length=100)
+    region_name = models.CharField(max_length=100, blank=True, default="")
+    groups = models.ManyToManyField(
+        Group,
+        blank=True,
+        related_name="admmonitor_constellations",
+        verbose_name="Alerted groups",
+        help_text=(
+            "Auth groups (usually corporations) responsible for this constellation. "
+            "The matching Discord roles are pinged when a system here drops below "
+            "the threshold."
+        ),
+    )
+    extra_mentions = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=(
+            "Optional raw mentions appended after the group pings, e.g. "
+            "'<@&123456789012345678> @here'. Use this when a group's Discord role "
+            "has a different name than the Auth group."
+        ),
+    )
+    last_seen_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ["region_name", "name"]
+        verbose_name = "Monitored Constellation"
+        verbose_name_plural = "Monitored Constellations"
+
+    def __str__(self) -> str:
+        if self.region_name:
+            return f"{self.name} ({self.region_name})"
+        return self.name
+
+
 class SystemAdmStatus(models.Model):
     """Last known ADM and alert state for one monitored solar system."""
 
     system_id = models.BigIntegerField(unique=True)
     system_name = models.CharField(max_length=100)
     region_name = models.CharField(max_length=100, blank=True, default="")
+    constellation = models.ForeignKey(
+        MonitoredConstellation,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="systems",
+    )
     alliance_id = models.BigIntegerField(null=True, blank=True)
     alliance_name = models.CharField(max_length=255, blank=True, default="")
 
@@ -134,3 +239,24 @@ class SystemAdmStatus(models.Model):
 
     def __str__(self) -> str:
         return f"{self.system_name} (ADM {self.adm:g})"
+
+
+class StatusBoardMessage(models.Model):
+    """A Discord message currently making up the status board.
+
+    Tracked so the board can be cleaned up again even when purging is limited to
+    this plugin's own messages.
+    """
+
+    channel_id = models.BigIntegerField()
+    message_id = models.BigIntegerField(unique=True)
+    position = models.IntegerField(default=0)
+    posted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["position", "id"]
+        verbose_name = "Status Board Message"
+        verbose_name_plural = "Status Board Messages"
+
+    def __str__(self) -> str:
+        return f"message {self.message_id} in channel {self.channel_id}"

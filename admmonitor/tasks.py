@@ -1,9 +1,13 @@
 """Celery tasks for the ADM monitor.
 
 A single periodic task (`run_admmonitor`, scheduled via CELERYBEAT_SCHEDULE in
-local.py) refreshes ADM data from ESI, fires immediate alerts for systems that
-newly dropped below the threshold, and sends the daily report once the
-configured time of day (UTC) has passed.
+local.py) refreshes ADM data from ESI and keeps the Discord status board in
+sync: the channel is purged and the current list of systems below the threshold,
+grouped by constellation and pinging the groups assigned to each constellation,
+is reposted whenever it changes.
+
+When no Discord bot token is available the monitor falls back to the older
+append-only alerts (immediate alert + daily report embeds).
 """
 
 import logging
@@ -12,7 +16,8 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from celery import shared_task
 from django.utils import timezone
 
-from .models import AdmMonitorConfig, SystemAdmStatus
+from . import board, discordapi
+from .models import AdmMonitorConfig, MonitoredConstellation, SystemAdmStatus
 from .notify import COLOR_DANGER, COLOR_OK, COLOR_WARNING, send_alert
 from .providers import esi
 
@@ -30,7 +35,7 @@ def _get(obj, key, default=None):
 
 @shared_task(time_limit=900)
 def run_admmonitor():
-    """Main periodic task: refresh ADM data, then handle alerting."""
+    """Main periodic task: refresh ADM data, then update the board / alerts."""
     config = AdmMonitorConfig.get_config()
     if config is None or not config.enabled:
         logger.debug("ADM monitor is not configured or disabled, skipping run")
@@ -43,6 +48,10 @@ def run_admmonitor():
         logger.exception("Failed to update ADM data from ESI, skipping this run")
         return
 
+    if _board_available(config):
+        refresh_status_board(config)
+        return
+
     if config.immediate_alerts_enabled:
         send_immediate_alerts(config)
     if config.daily_report_enabled:
@@ -50,12 +59,42 @@ def run_admmonitor():
 
 
 @shared_task(time_limit=300)
+def refresh_board_task(force: bool = True):
+    """Repost the status board immediately (used by the admin action)."""
+    config = AdmMonitorConfig.get_config()
+    if config is None:
+        return
+    if _board_available(config):
+        board.publish_board(config, force=force)
+    else:
+        send_daily_report_task()
+
+
+@shared_task(time_limit=300)
 def send_daily_report_task():
-    """Send the daily report immediately (used by the admin action)."""
+    """Send the legacy daily report immediately (fallback delivery)."""
     config = AdmMonitorConfig.get_config()
     if config is None:
         return
     if send_daily_report(config):
+        config.last_daily_report_at = timezone.now()
+        config.save(update_fields=["last_daily_report_at"])
+
+
+def _board_available(config) -> bool:
+    return bool(
+        config.status_board_enabled
+        and config.discord_channel_id
+        and discordapi.bot_token(config)
+    )
+
+
+def refresh_status_board(config: AdmMonitorConfig):
+    """Repost the board when it changed, or when the daily refresh is due."""
+    force = config.daily_report_enabled and _daily_refresh_due(config)
+    if not force and not config.immediate_alerts_enabled:
+        return
+    if board.publish_board(config, force=force) and force:
         config.last_daily_report_at = timezone.now()
         config.save(update_fields=["last_daily_report_at"])
 
@@ -100,7 +139,8 @@ def update_adm_data(config: AdmMonitorConfig):
     existing = {row.system_id: row for row in SystemAdmStatus.objects.all()}
     is_first_run = not existing
 
-    # Drop systems that left scope (sov lost or filter changed).
+    # Drop systems that left scope (sov lost or filter changed). Their
+    # constellations are kept so the group assignments survive.
     stale_ids = set(existing) - set(info_by_system)
     if stale_ids:
         SystemAdmStatus.objects.filter(system_id__in=stale_ids).delete()
@@ -115,14 +155,23 @@ def update_adm_data(config: AdmMonitorConfig):
 
     now = timezone.now()
     threshold = config.threshold
+    seen_constellations = set()
     for system_id, info in info_by_system.items():
         row = existing.get(system_id)
         if row is None:
             row = SystemAdmStatus(
                 system_id=system_id,
                 system_name=names.get(system_id, str(system_id)),
-                region_name=lookup_region_name(system_id),
             )
+        # Also backfills rows created before constellations were tracked.
+        if row.constellation_id is None:
+            constellation = resolve_constellation(system_id)
+            if constellation is not None:
+                row.constellation = constellation
+                row.region_name = constellation.region_name
+        if row.constellation_id is not None:
+            seen_constellations.add(row.constellation_id)
+
         alliance_id = info["alliance_id"]
         row.alliance_id = alliance_id
         if alliance_id and alliance_id in names:
@@ -150,9 +199,15 @@ def update_adm_data(config: AdmMonitorConfig):
             row.first_seen_below = None
         row.save()
 
+    if seen_constellations:
+        MonitoredConstellation.objects.filter(pk__in=seen_constellations).update(
+            last_seen_at=now
+        )
+
     logger.info(
-        "ADM data updated: %d system(s) monitored, %d below threshold %g",
+        "ADM data updated: %d system(s) in %d constellation(s), %d below threshold %g",
         len(info_by_system),
+        len(seen_constellations),
         SystemAdmStatus.objects.filter(below_threshold=True).count(),
         threshold,
     )
@@ -182,20 +237,29 @@ def send_immediate_alerts(config: AdmMonitorConfig):
         logger.error("Immediate alert could not be sent, will retry next run")
 
 
-def check_daily_report(config: AdmMonitorConfig):
-    """Send the daily report on the first run at/after the configured UTC time."""
+def _daily_refresh_due(config: AdmMonitorConfig) -> bool:
+    """True on the first run at/after the configured UTC time each day."""
     now = timezone.now().astimezone(dt_timezone.utc)
     scheduled_today = datetime.combine(
         now.date(), config.daily_report_time, tzinfo=dt_timezone.utc
     )
     last_due = (
-        scheduled_today if now >= scheduled_today else scheduled_today - timedelta(days=1)
+        scheduled_today
+        if now >= scheduled_today
+        else scheduled_today - timedelta(days=1)
     )
-    if config.last_daily_report_at and config.last_daily_report_at >= last_due:
+    return not (
+        config.last_daily_report_at and config.last_daily_report_at >= last_due
+    )
+
+
+def check_daily_report(config: AdmMonitorConfig):
+    """Send the legacy daily report on the first run at/after the configured time."""
+    if not _daily_refresh_due(config):
         return  # already sent for the current cycle
 
     if send_daily_report(config):
-        config.last_daily_report_at = now
+        config.last_daily_report_at = timezone.now()
         config.save(update_fields=["last_daily_report_at"])
         logger.info("Daily ADM report sent")
     else:
@@ -253,19 +317,32 @@ def resolve_names(ids: list) -> dict:
     return names
 
 
-def lookup_region_name(system_id: int) -> str:
-    """Resolve a system's region name (system -> constellation -> region)."""
+def resolve_constellation(system_id: int):
+    """Get (creating if needed) the MonitoredConstellation a system sits in.
+
+    Walks system -> constellation -> region in ESI. Only called for systems that
+    are new (or predate constellation tracking), so this stays cheap.
+    """
     try:
         system = esi.client.Universe.GetUniverseSystemsSystemId(
             system_id=system_id
         ).result(use_etag=False)
+        constellation_id = _get(system, "constellation_id")
         constellation = esi.client.Universe.GetUniverseConstellationsConstellationId(
-            constellation_id=_get(system, "constellation_id")
+            constellation_id=constellation_id
         ).result(use_etag=False)
         region = esi.client.Universe.GetUniverseRegionsRegionId(
             region_id=_get(constellation, "region_id")
         ).result(use_etag=False)
-        return _get(region, "name", "")
     except Exception:
-        logger.warning("Could not resolve region for system %s", system_id)
-        return ""
+        logger.warning("Could not resolve constellation for system %s", system_id)
+        return None
+
+    row, _created = MonitoredConstellation.objects.get_or_create(
+        constellation_id=constellation_id,
+        defaults={
+            "name": _get(constellation, "name", str(constellation_id)),
+            "region_name": _get(region, "name", ""),
+        },
+    )
+    return row
