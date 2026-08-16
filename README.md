@@ -182,7 +182,11 @@ group still appear on the board — just without a ping.
 
 ### 9. Test it
 
-On the configuration list page, tick the config and use the admin actions:
+On the configuration page itself there is a **Save and run ADM check now** button
+below the save row. It saves your edits first, then queues the check — so a threshold or
+channel you just changed is already in effect when it runs.
+
+For the rest, on the configuration *list* page tick the config and use the admin actions:
 
 - **Send test message to Discord** — verifies delivery end-to-end.
 - **Run ADM check now** — queues an immediate ESI refresh and board update.

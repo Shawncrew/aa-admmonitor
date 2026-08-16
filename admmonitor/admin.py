@@ -1,5 +1,7 @@
 from django.contrib import admin, messages
 from django.db.models import Count, Min, Q
+from django.http import HttpResponseRedirect
+from django.urls import reverse
 
 from . import discordapi, tasks
 from .models import (
@@ -67,9 +69,37 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
         ),
     )
     actions = ("send_test_message", "run_check_now", "refresh_board_now")
+    change_form_template = "admin/admmonitor/admmonitorconfig/change_form.html"
 
     def has_add_permission(self, request):
         return not AdmMonitorConfig.objects.exists()
+
+    def _maybe_run_check(self, request, obj):
+        """Handle the 'Save and run ADM check now' button on the config form."""
+        if "_run_check" not in request.POST:
+            return None
+        tasks.run_admmonitor.delay()
+        self.message_user(
+            request,
+            "Configuration saved and an ADM check was queued. Refresh in a moment "
+            "to see the updated System ADM Statuses and Monitored Constellations.",
+            messages.SUCCESS,
+        )
+        # Always land on the change page: after an add, the add view is no longer
+        # reachable (the config is a singleton).
+        return HttpResponseRedirect(
+            reverse("admin:admmonitor_admmonitorconfig_change", args=[obj.pk])
+        )
+
+    def response_change(self, request, obj):
+        return self._maybe_run_check(request, obj) or super().response_change(
+            request, obj
+        )
+
+    def response_add(self, request, obj, post_url_continue=None):
+        return self._maybe_run_check(request, obj) or super().response_add(
+            request, obj, post_url_continue
+        )
 
     @admin.display(description="Board status")
     def board_status(self, obj):

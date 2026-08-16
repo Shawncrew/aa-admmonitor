@@ -1,0 +1,16 @@
+{% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{# Adds a manual trigger next to the usual save row. The form is saved first, so
+   a threshold or channel edited just above is already in effect when the check
+   runs. #}
+{% block submit_buttons_bottom %}
+  {{ block.super }}
+  <div class="submit-row">
+    <input type="submit" name="_run_check"
+           value="{% translate 'Save and run ADM check now' %}">
+    <p class="help" style="padding: 0 10px; margin: 0; line-height: 2.2;">
+      {% translate "Queues an immediate ESI refresh and, if the status board is enabled, reposts it." %}
+    </p>
+  </div>
+{% endblock %}
