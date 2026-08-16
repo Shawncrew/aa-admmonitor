@@ -43,9 +43,17 @@ Systems below ADM 4.0 · updated 16 August 2026 14:15
 
 **B-7DFU** · Delve @Corp Charlie
 > **319-3D** — ADM 3.6 · Mil 4 / Ind 3 / Str 1 — My Alliance
+
+**Constellations at or above ADM 4.0**
+> ✅ **G8-D09** · Pure Blind · 6 system(s) — Corp Delta
+> ✅ **MDM8-J** · Pure Blind · 6 system(s) — *no group assigned*
 ```
 
 Constellations are ordered by their worst system, so the most urgent block is at the top.
+
+The trailing "at or above" section is optional — turn on **Show healthy constellations** to
+get the full picture rather than only the problems. The groups there are listed in **plain
+text and never pinged**; only the constellations that actually need attention ping anyone.
 
 ## How it works
 
@@ -168,6 +176,7 @@ Open your Auth site → **Admin** → **ADM Monitor** → **ADM Monitor Configur
 | **Status board enabled** | Purge-and-repost mode. Off = the old append-only alerts. |
 | **Purge all messages** | On: delete *every* message in the channel on repost. Off: delete only the board messages this plugin posted. |
 | **Mention groups** | Ping the roles of the groups assigned to each constellation. |
+| **Show healthy constellations** | Also list the constellations where every system is at or above the threshold, with their groups named in plain text (never pinged). Off by default. |
 | **Repost on change** | Repost (and re-ping) as soon as the list of below-threshold systems changes. |
 | **Daily refresh enabled / time** | Repost once a day even when nothing changed, at this time in **EVE time (UTC)**. |
 

@@ -14,6 +14,7 @@ import logging
 import re
 from collections import defaultdict
 
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from . import discordapi
@@ -53,11 +54,39 @@ def board_signature(config) -> tuple:
         f":{assignments.get(row.constellation_id, '')}"
         for row in below
     ]
+
+    healthy = _healthy_constellations(config)
+    # The healthy list has to be hashed too: a group reassignment or a system
+    # count change there alters the board without touching the below list.
+    parts += [
+        f"ok:{constellation.pk}:{constellation.system_total}"
+        f":{sorted(group.pk for group in constellation.groups.all())}"
+        for constellation in healthy
+    ]
+
     signature = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
-    return below, signature
+    return below, healthy, signature
 
 
-def build_board(config, below: list) -> tuple:
+def _healthy_constellations(config) -> list:
+    """Non-ignored constellations whose every system is at or above threshold."""
+    if not config.show_healthy_constellations:
+        return []
+    return list(
+        MonitoredConstellation.objects.filter(ignored=False)
+        .annotate(
+            system_total=Count("systems", distinct=True),
+            below_total=Count(
+                "systems", filter=Q(systems__below_threshold=True), distinct=True
+            ),
+        )
+        .filter(system_total__gt=0, below_total=0)
+        .prefetch_related("groups")
+        .order_by("region_name", "name")
+    )
+
+
+def build_board(config, below: list, healthy: list) -> tuple:
     """Render the board into ``(messages, role_ids, allow_everyone)``."""
     mention_map, role_ids, allow_everyone = _mentions_by_constellation(config, below)
 
@@ -72,7 +101,28 @@ def build_board(config, below: list) -> tuple:
     else:
         body = _constellation_blocks(below, mention_map)
 
+    if healthy:
+        body.append(_healthy_block(config, healthy))
+
     return _split_messages(header, body), role_ids, allow_everyone
+
+
+def _healthy_block(config, healthy: list) -> str:
+    """The 'all clear' section. Group names are plain text, deliberately not pings.
+
+    Nothing here can ping even by accident: the message's allowed_mentions only
+    ever whitelists the role IDs collected from the below-threshold section.
+    """
+    lines = [f"**Constellations at or above ADM {config.threshold:g}**"]
+    for constellation in healthy:
+        region = f" · {constellation.region_name}" if constellation.region_name else ""
+        names = ", ".join(group.name for group in constellation.groups.all())
+        owners = names if names else "*no group assigned*"
+        lines.append(
+            f"> ✅ **{constellation.name}**{region}"
+            f" · {constellation.system_total} system(s) — {owners}"
+        )
+    return "\n".join(lines)
 
 
 def _constellation_blocks(below: list, mention_map: dict) -> list:
@@ -216,12 +266,12 @@ def publish_board(config, force: bool = False) -> bool:
         )
         return False
 
-    below, signature = board_signature(config)
+    below, healthy, signature = board_signature(config)
     if not force and signature == config.last_board_signature:
         logger.debug("ADM status board unchanged, leaving the channel alone")
         return False
 
-    messages, role_ids, allow_everyone = build_board(config, below)
+    messages, role_ids, allow_everyone = build_board(config, below, healthy)
     channel_id = config.discord_channel_id
     try:
         _purge_channel(config, channel_id, token)

@@ -46,6 +46,7 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
                     "status_board_enabled",
                     "purge_all_messages",
                     "mention_groups",
+                    "show_healthy_constellations",
                     "board_status",
                 ),
                 "description": (

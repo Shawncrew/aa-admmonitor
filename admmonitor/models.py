@@ -96,6 +96,15 @@ class AdmMonitorConfig(models.Model):
             "name."
         ),
     )
+    show_healthy_constellations = models.BooleanField(
+        default=False,
+        verbose_name="Show healthy constellations",
+        help_text=(
+            "Also list the constellations where every system is at or above the "
+            "threshold, ticked off at the bottom of the board. Their assigned groups "
+            "are named in plain text and are never pinged."
+        ),
+    )
 
     daily_report_enabled = models.BooleanField(
         default=True,
