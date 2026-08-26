@@ -2,9 +2,10 @@
 
 A single periodic task (`run_admmonitor`, scheduled via CELERYBEAT_SCHEDULE in
 local.py) refreshes ADM data from ESI and keeps the Discord status board in
-sync: the channel is purged and the current list of systems below the threshold,
-grouped by constellation and pinging the groups assigned to each constellation,
-is reposted whenever it changes.
+sync: the channel is purged and the current list of systems failing an enabled
+alert criterion (ADM and/or military index and/or industry index), grouped by
+constellation and pinging the groups assigned to each constellation, is reposted
+whenever it changes.
 
 When no Discord bot token is available the monitor falls back to the older
 append-only alerts (immediate alert + daily report embeds).
@@ -40,6 +41,12 @@ def run_admmonitor():
     if config is None or not config.enabled:
         logger.debug("ADM monitor is not configured or disabled, skipping run")
         return
+
+    if not config.active_criteria():
+        logger.warning(
+            "No alert criteria are enabled (ADM / military / industry are all off); "
+            "nothing will ever be reported."
+        )
 
     try:
         update_adm_data(config)
@@ -154,7 +161,6 @@ def update_adm_data(config: AdmMonitorConfig):
     names = resolve_names(ids_to_resolve)
 
     now = timezone.now()
-    threshold = config.threshold
     seen_constellations = set()
     for system_id, info in info_by_system.items():
         row = existing.get(system_id)
@@ -182,8 +188,12 @@ def update_adm_data(config: AdmMonitorConfig):
         row.military_level = info["military_level"]
         row.industrial_level = info["industrial_level"]
         row.strategic_level = info["strategic_level"]
+        failed = config.evaluate(
+            adm, info["military_level"], info["industrial_level"]
+        )
+        row.failed_checks = ",".join(failed)
         was_below = row.below_threshold
-        is_below = adm < threshold
+        is_below = bool(failed)
         if is_below and not was_below:
             row.below_threshold = True
             row.first_seen_below = now
@@ -205,18 +215,18 @@ def update_adm_data(config: AdmMonitorConfig):
         )
 
     logger.info(
-        "ADM data updated: %d system(s) in %d constellation(s), %d below threshold %g "
+        "ADM data updated: %d system(s) in %d constellation(s), %d failing [%s] "
         "(%d reported, the rest sit in ignored constellations)",
         len(info_by_system),
         len(seen_constellations),
         SystemAdmStatus.objects.filter(below_threshold=True).count(),
-        threshold,
+        config.criteria_description(),
         SystemAdmStatus.reportable_below().count(),
     )
 
 
 def send_immediate_alerts(config: AdmMonitorConfig):
-    """Alert once for every system that newly dropped below the threshold."""
+    """Alert once for every system that newly started failing a criterion."""
     pending = list(
         SystemAdmStatus.reportable_below()
         .filter(immediate_alert_sent=False)
@@ -228,7 +238,8 @@ def send_immediate_alerts(config: AdmMonitorConfig):
     show_alliance = len(config.alliance_id_set()) != 1
     lines = [format_system_line(row, show_alliance) for row in pending]
     title = (
-        f"⚠️ ADM Alert — {len(pending)} system(s) dropped below {config.threshold:g}"
+        f"⚠️ ADM Alert — {len(pending)} system(s) now failing "
+        f"{config.criteria_description()}"
     )
     if send_alert(config, title, lines, COLOR_DANGER):
         SystemAdmStatus.objects.filter(pk__in=[row.pk for row in pending]).update(
@@ -274,22 +285,25 @@ def send_daily_report(config: AdmMonitorConfig) -> bool:
         show_alliance = len(config.alliance_id_set()) != 1
         lines = [format_system_line(row, show_alliance) for row in below]
         title = (
-            f"📊 Daily ADM Report — {len(below)} system(s) below {config.threshold:g}"
+            f"📊 Daily ADM Report — {len(below)} system(s) failing "
+            f"{config.criteria_description()}"
         )
         return send_alert(config, title, lines, COLOR_WARNING)
 
-    title = f"📊 Daily ADM Report — all systems at or above {config.threshold:g}"
-    lines = ["All monitored systems are at or above the configured ADM threshold. o7"]
+    title = "📊 Daily ADM Report — all systems meet the configured criteria"
+    lines = [f"All monitored systems pass: {config.criteria_description()}. o7"]
     return send_alert(config, title, lines, COLOR_OK)
 
 
 def format_system_line(row: SystemAdmStatus, show_alliance: bool) -> str:
+    failed = set(row.failed_list())
+    flag = lambda key: " ⚠" if key in failed else ""  # noqa: E731
     region = f" ({row.region_name})" if row.region_name else ""
-    line = f"**{row.system_name}**{region} — ADM **{row.adm:.1f}**"
+    line = f"**{row.system_name}**{region} — ADM **{row.adm:.1f}**{flag('adm')}"
     if row.military_level is not None:
         line += (
-            f" · Mil {row.military_level}"
-            f" / Ind {row.industrial_level}"
+            f" · Mil {row.military_level}{flag('military')}"
+            f" / Ind {row.industrial_level}{flag('industry')}"
             f" / Str {row.strategic_level}"
         )
     if show_alliance and row.alliance_name:

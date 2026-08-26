@@ -18,7 +18,7 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
     list_display = (
         "__str__",
         "enabled",
-        "threshold",
+        "criteria_summary",
         "status_board_enabled",
         "immediate_alerts_enabled",
         "daily_report_enabled",
@@ -27,7 +27,22 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
     )
     readonly_fields = ("last_daily_report_at", "board_status")
     fieldsets = (
-        ("General", {"fields": ("enabled", "threshold", "alliance_ids")}),
+        ("General", {"fields": ("enabled", "alliance_ids")}),
+        (
+            "Alert criteria",
+            {
+                "fields": (
+                    ("adm_alerts_enabled", "threshold"),
+                    ("military_alerts_enabled", "military_threshold"),
+                    ("industry_alerts_enabled", "industry_threshold"),
+                ),
+                "description": (
+                    "Enable any combination. A system is reported when it fails "
+                    "<b>any</b> enabled criterion — they are OR'd, not AND'd. "
+                    "With none enabled, nothing is ever reported."
+                ),
+            },
+        ),
         (
             "Discord delivery",
             {
@@ -101,6 +116,10 @@ class AdmMonitorConfigAdmin(admin.ModelAdmin):
         return self._maybe_run_check(request, obj) or super().response_add(
             request, obj, post_url_continue
         )
+
+    @admin.display(description="Alert criteria")
+    def criteria_summary(self, obj):
+        return obj.criteria_description()
 
     @admin.display(description="Board status")
     def board_status(self, obj):
@@ -250,11 +269,13 @@ class SystemAdmStatusAdmin(admin.ModelAdmin):
         "industrial_level",
         "strategic_level",
         "below_threshold",
+        "failed_checks",
         "first_seen_below",
         "last_updated",
     )
     list_filter = (
         "below_threshold",
+        "failed_checks",
         "constellation__ignored",
         "region_name",
         "constellation",

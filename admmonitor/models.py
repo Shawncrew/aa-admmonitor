@@ -12,11 +12,43 @@ class AdmMonitorConfig(models.Model):
         default=True,
         help_text="Master switch. When disabled, no ESI polling or alerting happens.",
     )
+    adm_alerts_enabled = models.BooleanField(
+        default=True,
+        verbose_name="Alert on ADM",
+        help_text="Report systems whose ADM falls below the ADM threshold.",
+    )
     threshold = models.FloatField(
         default=4.0,
+        verbose_name="ADM threshold",
         help_text=(
             "Systems with an ADM strictly below this value are reported "
             "(valid ADM range in EVE is 1.0 - 6.0)."
+        ),
+    )
+    military_alerts_enabled = models.BooleanField(
+        default=False,
+        verbose_name="Alert on military index",
+        help_text="Report systems whose military index falls below its threshold.",
+    )
+    military_threshold = models.IntegerField(
+        default=5,
+        verbose_name="Military index threshold",
+        help_text=(
+            "Systems with a military index strictly below this value are reported "
+            "(index levels run 0 - 5)."
+        ),
+    )
+    industry_alerts_enabled = models.BooleanField(
+        default=False,
+        verbose_name="Alert on industry index",
+        help_text="Report systems whose industry index falls below its threshold.",
+    )
+    industry_threshold = models.IntegerField(
+        default=5,
+        verbose_name="Industry index threshold",
+        help_text=(
+            "Systems with an industry index strictly below this value are reported "
+            "(index levels run 0 - 5)."
         ),
     )
     alliance_ids = models.CharField(
@@ -76,8 +108,9 @@ class AdmMonitorConfig(models.Model):
         default=True,
         help_text=(
             "Maintain a single up-to-date status board in the channel: existing "
-            "messages are deleted and the current list of systems below the "
-            "threshold, grouped by constellation, is reposted. Requires a bot token."
+            "messages are deleted and the current list of systems failing an "
+            "enabled criterion, grouped by constellation, is reposted. Requires a "
+            "bot token."
         ),
     )
     purge_all_messages = models.BooleanField(
@@ -100,8 +133,8 @@ class AdmMonitorConfig(models.Model):
         default=False,
         verbose_name="Show healthy constellations",
         help_text=(
-            "Also list the constellations where every system is at or above the "
-            "threshold, ticked off at the bottom of the board. Their assigned groups "
+            "Also list the constellations where every system passes every "
+            "enabled criterion, ticked off at the bottom of the board. Their groups "
             "are named in plain text and are never pinged."
         ),
     )
@@ -127,7 +160,7 @@ class AdmMonitorConfig(models.Model):
         verbose_name="Repost on change",
         help_text=(
             "Repost the board (and re-ping the assigned groups) as soon as the set of "
-            "systems below the threshold changes. With this off the board is only "
+            "failing systems changes. With this off the board is only "
             "refreshed at the daily refresh time."
         ),
     )
@@ -151,6 +184,47 @@ class AdmMonitorConfig(models.Model):
     @classmethod
     def get_config(cls):
         return cls.objects.first()
+
+    def active_criteria(self) -> list:
+        """The enabled alert criteria as ``(key, label, threshold)`` tuples."""
+        criteria = []
+        if self.adm_alerts_enabled:
+            criteria.append(("adm", "ADM", self.threshold))
+        if self.military_alerts_enabled:
+            criteria.append(("military", "Military", self.military_threshold))
+        if self.industry_alerts_enabled:
+            criteria.append(("industry", "Industry", self.industry_threshold))
+        return criteria
+
+    def criteria_description(self) -> str:
+        """Human-readable summary of what currently triggers an alert."""
+        criteria = self.active_criteria()
+        if not criteria:
+            return "nothing — no alert criteria are enabled"
+        return " or ".join(f"{label} < {value:g}" for _key, label, value in criteria)
+
+    def evaluate(self, adm, military_level, industrial_level) -> list:
+        """Which enabled criteria a system fails. An empty list means healthy.
+
+        A metric ESI did not report (None) is treated as unknown and never
+        counts as a failure, so a gap in the data cannot manufacture an alert.
+        """
+        failed = []
+        if self.adm_alerts_enabled and adm is not None and adm < self.threshold:
+            failed.append("adm")
+        if (
+            self.military_alerts_enabled
+            and military_level is not None
+            and military_level < self.military_threshold
+        ):
+            failed.append("military")
+        if (
+            self.industry_alerts_enabled
+            and industrial_level is not None
+            and industrial_level < self.industry_threshold
+        ):
+            failed.append("industry")
+        return failed
 
     def alliance_id_set(self) -> set:
         """Parse the comma-separated alliance ID filter into a set of ints."""
@@ -184,8 +258,8 @@ class MonitoredConstellation(models.Model):
         verbose_name="Alerted groups",
         help_text=(
             "Auth groups (usually corporations) responsible for this constellation. "
-            "The matching Discord roles are pinged when a system here drops below "
-            "the threshold."
+            "The matching Discord roles are pinged when a system here fails an "
+            "enabled alert criterion."
         ),
     )
     extra_mentions = models.CharField(
@@ -240,7 +314,20 @@ class SystemAdmStatus(models.Model):
     military_level = models.IntegerField(null=True, blank=True)
     industrial_level = models.IntegerField(null=True, blank=True)
     strategic_level = models.IntegerField(null=True, blank=True)
-    below_threshold = models.BooleanField(default=False)
+    below_threshold = models.BooleanField(
+        default=False,
+        verbose_name="Failing",
+        help_text="Set when the system fails at least one enabled alert criterion.",
+    )
+    failed_checks = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=(
+            "Comma-separated keys of the criteria this system currently fails "
+            "(adm, military, industry)."
+        ),
+    )
     immediate_alert_sent = models.BooleanField(
         default=False,
         help_text=(
@@ -259,9 +346,12 @@ class SystemAdmStatus(models.Model):
     def __str__(self) -> str:
         return f"{self.system_name} (ADM {self.adm:g})"
 
+    def failed_list(self) -> list:
+        return [key for key in self.failed_checks.split(",") if key]
+
     @classmethod
     def reportable_below(cls):
-        """Systems below the threshold that should actually be reported.
+        """Systems failing an enabled criterion that should actually be reported.
 
         Excludes constellations flagged as ignored. Systems whose constellation
         could not be resolved are kept — they show up under 'Unassigned systems'

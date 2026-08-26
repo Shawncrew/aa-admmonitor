@@ -2,13 +2,14 @@
 
 An [Alliance Auth](https://gitlab.com/allianceauth/allianceauth) plugin that monitors the
 **ADM (Activity Defense Multiplier)** of your alliance's sovereignty systems via ESI and
-keeps a live **status board** in a Discord channel listing every system below a
-configurable threshold, grouped by constellation and pinging the groups responsible for it.
+and **sovereignty index levels**, and keeps a live **status board** in a Discord channel
+listing every system that falls below your configured thresholds, grouped by constellation
+and pinging the groups responsible for it.
 
 ## Features
 
 - **Status board instead of alert spam.** The plugin purges the channel and reposts a
-  single current picture of every system below the threshold, **grouped by constellation**.
+  single current picture of every failing system, **grouped by constellation**.
   There is never a trail of stale alerts to scroll through — what's in the channel *is* the
   current state.
 - **Constellation → group assignments.** Every constellation holding at least one system
@@ -17,9 +18,12 @@ configurable threshold, grouped by constellation and pinging the groups responsi
   constellations and a constellation can have several groups.
 - **Targeted pings.** The Discord roles of the assigned groups are mentioned **right after
   the constellation name**, so each corp sees its own constellations highlighted.
-- **Quiet when nothing changes.** The board is only reposted when the set of systems below
-  the threshold actually changes (plus one daily refresh, so the board stays near the bottom
-  of the channel).
+- **Quiet when nothing changes.** The board is only reposted when the set of failing systems
+  actually changes (plus one daily refresh, so the board stays near the bottom of the
+  channel).
+- **Configurable alert criteria.** Alert on **ADM**, the **military index**, the
+  **industry index**, or any combination. The criteria are OR'd: a system is reported when
+  it fails **any** enabled check, and the board marks which metric tripped it with a ⚠.
 - **Ignore constellations** you don't care about (staging, rentals) — still tracked in the
   admin, never reported.
 - Per-system detail: current ADM plus the military / industrial / strategic index levels,
@@ -35,23 +39,23 @@ configurable threshold, grouped by constellation and pinging the groups responsi
 
 ```
 ## 🛡️ ADM Status Board
-Systems below ADM 4.0 · updated 16 August 2026 14:15
+Alerting on ADM < 4 or Military < 5 · updated 16 August 2026 14:15
 
 **KVN-36** · Fountain @Corp Alpha @Corp Bravo
-> **Y-2ANO** — ADM 2.4 · Mil 3 / Ind 1 / Str 2 — My Alliance
+> **Y-2ANO** — ADM 2.4 ⚠ · Mil 3 ⚠ / Ind 1 / Str 2 — My Alliance
 > **4-07MU** — ADM 3.1 · Mil 4 / Ind 2 / Str 2 — My Alliance
 
 **B-7DFU** · Delve @Corp Charlie
 > **319-3D** — ADM 3.6 · Mil 4 / Ind 3 / Str 1 — My Alliance
 
-**Constellations at or above ADM 4.0**
+**Constellations meeting all criteria**
 > ✅ **G8-D09** · Pure Blind · 6 system(s) — Corp Delta
 > ✅ **MDM8-J** · Pure Blind · 6 system(s) — *no group assigned*
 ```
 
 Constellations are ordered by their worst system, so the most urgent block is at the top.
 
-The trailing "at or above" section is optional — turn on **Show healthy constellations** to
+The trailing "meeting all criteria" section is optional — turn on **Show healthy constellations** to
 get the full picture rather than only the problems. The groups there are listed in **plain
 text and never pinged**; only the constellations that actually need attention ping anyone.
 
@@ -62,6 +66,8 @@ A single Celery task runs on a schedule you define (every 15 minutes recommended
 1. Pulls the sovereignty systems list from ESI (`GetSovereigntySystems`) and keeps the
    systems claimed by your configured alliance(s), reading the ADM and the
    military/industrial/strategic levels from each claim's development block.
+   Each system is then checked against every **enabled** alert criterion; failing any one
+   of them puts it on the board.
 2. Updates the per-system state table. For systems it hasn't seen before it resolves
    system → constellation → region once via ESI and creates the constellation row that you
    then assign groups to.
@@ -79,7 +85,7 @@ the group pings. Unmatched groups are logged as a warning and skipped rather tha
 the run.
 
 > **Note on re-pinging:** because the board is deleted and reposted, every constellation
-> that currently has a system below the threshold is pinged again on each repost — not just
+> that currently has a failing system is pinged again on each repost — not just
 > the constellation that changed. Reposts only happen when the content actually changes, so
 > a steady state is silent. If you want even fewer pings, turn *Repost on change* off and
 > leave only the daily refresh.
@@ -96,7 +102,7 @@ layout at `/opt/allianceauth/aa-docker` with your config in `conf/`.
 Append to `conf/requirements.txt`:
 
 ```
-aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.2.0
+aa-admmonitor @ git+https://github.com/Shawncrew/aa-admmonitor.git@v0.3.0
 ```
 
 (Pin a tag for reproducible builds; use `@master` to track the latest.)
@@ -167,7 +173,9 @@ Open your Auth site → **Admin** → **ADM Monitor** → **ADM Monitor Configur
 | Setting | Description |
 |---|---|
 | **Enabled** | Master switch for the whole monitor. |
-| **Threshold** | Systems with ADM strictly below this value are reported (e.g. `4.0`). |
+| **Alert on ADM** / **ADM threshold** | Report systems whose ADM is strictly below this value (e.g. `4.0`). On by default. |
+| **Alert on military index** / **Military index threshold** | Report systems whose military index is strictly below this value (levels run 0–5). Off by default. |
+| **Alert on industry index** / **Industry index threshold** | Report systems whose industry index is strictly below this value (levels run 0–5). Off by default. |
 | **Alliance IDs** | Comma-separated alliance IDs to monitor, e.g. `99003581`. Leave blank to monitor *all* sov systems in the game (not recommended). |
 | **Discord channel ID** | Channel the board lives in. Developer Mode → right-click the channel → *Copy ID*. |
 | **Discord bot token** | Leave blank to use the `DISCORD_BOT_TOKEN` setting. |
@@ -221,7 +229,7 @@ docker compose logs -f --tail=100 allianceauth_worker
 ## Installation (bare metal / venv)
 
 ```bash
-pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.2.0
+pip install git+https://github.com/Shawncrew/aa-admmonitor.git@v0.3.0
 ```
 
 Then add `admmonitor` to `INSTALLED_APPS`, add the `CELERYBEAT_SCHEDULE` entry shown above

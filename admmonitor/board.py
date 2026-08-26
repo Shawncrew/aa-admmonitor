@@ -1,9 +1,9 @@
 """Rendering and publishing of the Discord status board.
 
 The board is a set of plain-text messages listing every monitored system
-currently below the ADM threshold, grouped by constellation, with the Discord
-roles of the Auth groups assigned to that constellation pinged right after the
-constellation name.
+currently failing an enabled alert criterion, grouped by constellation, with
+the Discord roles of the Auth groups assigned to that constellation pinged
+right after the constellation name.
 
 Publishing purges the channel first, so the board is always the only thing in it
 and always reflects the current state instead of a trail of stale alerts.
@@ -48,9 +48,13 @@ def board_signature(config) -> tuple:
         .distinct()
         .prefetch_related("groups")
     }
-    parts = [f"threshold={config.threshold:g}", f"mentions={config.mention_groups}"]
+    parts = [
+        f"criteria={config.criteria_description()}",
+        f"mentions={config.mention_groups}",
+    ]
     parts += [
-        f"{row.system_id}:{row.adm:.2f}:{row.constellation_id}"
+        f"{row.system_id}:{row.adm:.2f}:{row.military_level}:{row.industrial_level}"
+        f":{row.failed_checks}:{row.constellation_id}"
         f":{assignments.get(row.constellation_id, '')}"
         for row in below
     ]
@@ -69,7 +73,7 @@ def board_signature(config) -> tuple:
 
 
 def _healthy_constellations(config) -> list:
-    """Non-ignored constellations whose every system is at or above threshold."""
+    """Non-ignored constellations where every system passes every criterion."""
     if not config.show_healthy_constellations:
         return []
     return list(
@@ -93,11 +97,12 @@ def build_board(config, below: list, healthy: list) -> tuple:
     stamp = int(timezone.now().timestamp())
     header = (
         f"## 🛡️ ADM Status Board\n"
-        f"Systems below ADM **{config.threshold:g}** · updated <t:{stamp}:f>"
+        f"Alerting on **{config.criteria_description()}**"
+        f" · updated <t:{stamp}:f>"
     )
 
     if not below:
-        body = ["✅ All monitored systems are at or above the threshold. o7"]
+        body = ["✅ All monitored systems meet the configured criteria. o7"]
     else:
         body = _constellation_blocks(below, mention_map)
 
@@ -113,7 +118,7 @@ def _healthy_block(config, healthy: list) -> str:
     Nothing here can ping even by accident: the message's allowed_mentions only
     ever whitelists the role IDs collected from the below-threshold section.
     """
-    lines = [f"**Constellations at or above ADM {config.threshold:g}**"]
+    lines = ["**Constellations meeting all criteria**"]
     for constellation in healthy:
         region = f" · {constellation.region_name}" if constellation.region_name else ""
         names = ", ".join(group.name for group in constellation.groups.all())
@@ -154,11 +159,17 @@ def _constellation_blocks(below: list, mention_map: dict) -> list:
 
 
 def _format_system_line(row: SystemAdmStatus) -> str:
-    line = f"**{row.system_name}** — ADM **{row.adm:.1f}**"
+    """One system, with a marker against whichever metric tripped the alert."""
+    failed = set(row.failed_list())
+
+    def flag(key):
+        return " ⚠" if key in failed else ""
+
+    line = f"**{row.system_name}** — ADM **{row.adm:.1f}**{flag('adm')}"
     if row.military_level is not None:
         line += (
-            f" · Mil {row.military_level}"
-            f" / Ind {row.industrial_level}"
+            f" · Mil {row.military_level}{flag('military')}"
+            f" / Ind {row.industrial_level}{flag('industry')}"
             f" / Str {row.strategic_level}"
         )
     if row.alliance_name:
